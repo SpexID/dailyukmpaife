@@ -1,0 +1,17 @@
+/* Pastikan body dan html bersih */
+html, body {
+  /* margin: 0;
+  padding: 0;
+  width: 100%; */
+  /* overflow-x: hidden;  */
+}
+
+/* Wrapper utama */
+.app-wrapper {
+  max-width: 1440px;     /* batas maksimal */
+  margin: 0 auto;         /* center */
+  width: 100%;            /* biar responsif */
+  /* padding-left: 16px;     
+  padding-right: 16px;    */
+  box-sizing: border-box;
+}
