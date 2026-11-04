@@ -15,7 +15,7 @@ const landingPalette = {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:3000';
 
-const QUIZ_TITLE = 'UKMPAI Quiz';
+const QUIZ_TITLE = 'UKMPPAI Quiz';
 const TOP_COUNT = 10;
 const MEDAL_COLORS = ['#f5b301', '#9aa4ad', '#b8733a'];
 
