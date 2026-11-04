@@ -2,7 +2,7 @@ import { Stack, Typography, Box, Button, CircularProgress } from '@mui/material'
 import { keyframes } from '@mui/material/styles';
 import { useNavigate } from 'react-router-dom';
 import logoapi from '../../assets/fire.svg';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 const landingPalette = {
   primary: '#C65E2B',
@@ -41,11 +41,11 @@ type RankedEntry = LeaderboardEntry & { rank: number };
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
-const getMsUntilMidnight = () => {
-  const now = new Date();
-  const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0);
-  return nextMidnight.getTime() - now.getTime();
-};
+// ✅ Epoch ms untuk 00:10 WIB quizDate (00:00 WIB + 10 menit buffer AI generate)
+function getOpenTimeWIB(quizDate: string): number {
+  const [y, m, d] = quizDate.split('-').map(Number);
+  return Date.UTC(y, m - 1, d) - 7 * 60 * 60 * 1000 + 10 * 60 * 1000;
+}
 
 const formatCountdown = (ms: number) => {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -152,49 +152,96 @@ export default function HomePage() {
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [msLeft, setMsLeft] = useState(getMsUntilMidnight);
 
+  // Flag "sudah pernah selesai fetch pertama kali"
+  const [initialized, setInitialized] = useState(false);
+
+  const [quizDate, setQuizDate] = useState<string | null>(null);
+  const [quizAvailable, setQuizAvailable] = useState(false);
+
+  const [now, setNow] = useState(Date.now());
+  const [refetchTick, setRefetchTick] = useState(0);
+
+  const prevRemainingRef = useRef<number | null>(null);
+
+  // ── Derived timing ──
+  const todayOpenTime = quizDate ? getOpenTimeWIB(quizDate) : null;
+  const nextResetTime =
+    todayOpenTime !== null ? todayOpenTime + 24 * 60 * 60 * 1000 : null;
+  const windowOpen = todayOpenTime !== null && now >= todayOpenTime;
+  const countdownTarget =
+    todayOpenTime === null ? null : windowOpen ? nextResetTime : todayOpenTime;
+  const remaining = countdownTarget !== null ? Math.max(0, countdownTarget - now) : 0;
+
+  const canPlay = windowOpen && quizAvailable;
+  const isWindowClosed = todayOpenTime !== null && !windowOpen;
+
+  // ── Scroll top ──
   useEffect(() => {
     window.scrollTo(0, 0);
   }, []);
 
-  // ── Fetch leaderboard hari ini ──
+  // ── Ticker ──
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ── Fetch + refetch ──
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       try {
         setLoading(true);
-        const res = await fetch(`${API_BASE}/dailyquiz/leaderboard-today`);
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          throw new Error(data.error || `HTTP ${res.status}`);
+        setError(null);
+
+        const lbRes = await fetch(`${API_BASE}/dailyquiz/leaderboard-today`);
+        if (!lbRes.ok) {
+          const data = await lbRes.json().catch(() => ({}));
+          throw new Error(data.error || `HTTP ${lbRes.status}`);
         }
-        const data = await res.json();
+        const lbData = await lbRes.json();
         if (cancelled) return;
 
-        setLeaderboard(data.leaderboard ?? []);
+        setLeaderboard(lbData.leaderboard ?? []);
+        setQuizDate(lbData.quiz_date ?? null);
+
+        try {
+          const actRes = await fetch(`${API_BASE}/dailyquiz/active`);
+          if (cancelled) return;
+          setQuizAvailable(actRes.ok);
+        } catch {
+          if (cancelled) return;
+          setQuizAvailable(true);
+        }
       } catch (err) {
         if (!cancelled) setError((err as Error).message || 'Gagal memuat peringkat');
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+          setInitialized(true); // ← pertama kali selesai fetch
+        }
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refetchTick]);
 
-  // ── Countdown ke 00:00 ──
+  // ── Auto refetch saat countdown mencapai 0 ──
   useEffect(() => {
-    const intervalId = setInterval(() => {
-      setMsLeft(getMsUntilMidnight());
-    }, 1000);
-    return () => clearInterval(intervalId);
-  }, []);
+    const prev = prevRemainingRef.current;
+    prevRemainingRef.current = remaining;
 
-  // ── Ranked entries untuk render ──
+    if (prev !== null && prev > 0 && remaining === 0 && countdownTarget !== null) {
+      const t = setTimeout(() => setRefetchTick((c) => c + 1), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [remaining, countdownTarget]);
+
+  // ── Ranked entries ──
   const { top, isEmpty } = useMemo(() => {
     if (leaderboard.length === 0) {
       return { top: [], isEmpty: true };
@@ -210,13 +257,38 @@ export default function HomePage() {
   }, [leaderboard]);
 
   const handleStart = () => {
+    if (!canPlay) return;
     navigate('/daily');
   };
 
+  // Info banner (hanya saat belum bisa main)
+  let infoText: string | null = null;
+  if (initialized && !quizDate && !loading) {
+    infoText = 'Quiz belum tersedia. Coba lagi beberapa saat lagi.';
+  } else if (isWindowClosed) {
+    infoText =
+      'Soal hari ini sedang dibuat oleh AI. Mohon tunggu, kuis akan otomatis terbuka sebentar lagi.';
+  } else if (windowOpen && !quizAvailable && !loading) {
+    infoText = 'Soal hari ini belum tersedia. Coba refresh sebentar lagi.';
+  }
+
+  const countdownLabel = windowOpen ? 'Kuis direset dalam' : 'Kuis dibuka dalam';
+
   return (
-    <Stack width="100%" minHeight="100vh" sx={{ backgroundColor: landingPalette.primaryContrastText }}>
+    <Stack
+      width="100%"
+      minHeight="100vh"
+      sx={{ backgroundColor: landingPalette.primaryContrastText }}
+    >
       {/* Bar atas */}
-      <Box sx={{ width: '100%', height: '10px', flexShrink: 0, backgroundColor: landingPalette.primaryDark }} />
+      <Box
+        sx={{
+          width: '100%',
+          height: '10px',
+          flexShrink: 0,
+          backgroundColor: landingPalette.primaryDark,
+        }}
+      />
 
       <Stack
         alignItems="center"
@@ -281,62 +353,171 @@ export default function HomePage() {
           </Typography>
         </Stack>
 
-        {/* Tombol mulai + hitung mundur */}
+        {/* AREA: tombol mulai + info + countdown */}
         <Stack alignItems="center" gap={1.5} width="100%" maxWidth="420px">
-          <Button
-            onClick={handleStart}
-            variant="contained"
-            fullWidth
-            sx={{
-              py: 1.75,
-              borderRadius: '10px',
-              textTransform: 'none',
-              fontWeight: 700,
-              fontSize: { xs: '20px', sm: '24px' },
-              color: landingPalette.primaryContrastText,
-              backgroundColor: landingPalette.primary,
-              boxShadow: '0 8px 20px rgba(198, 94, 43, 0.35)',
-              transition: 'transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease',
-              '&:hover': {
-                backgroundColor: landingPalette.primaryDark,
-                transform: 'translateY(-2px)',
-                boxShadow: '0 12px 24px rgba(198, 94, 43, 0.4)',
-              },
-              '&:active': { transform: 'scale(0.98)' },
-            }}
-          >
-            Mulai
-          </Button>
-
-          <Stack alignItems="center" gap={0.25}>
-            <Typography color={landingPalette.primaryDark} fontSize={{ xs: '14px', sm: '16px' }} sx={{ opacity: 0.8 }}>
-              Kuis direset dalam
-            </Typography>
-            <Typography
-              role="timer"
-              aria-label={`Kuis direset dalam ${formatCountdown(msLeft)}`}
-              color={landingPalette.primary}
-              fontWeight={700}
-              fontSize={{ xs: '26px', sm: '30px' }}
-              sx={{ fontVariantNumeric: 'tabular-nums', letterSpacing: '1px' }}
+          {!initialized ? (
+            /* ⏳ LOADING STATE — sebelum fetch pertama selesai */
+            <Stack
+              alignItems="center"
+              gap={1}
+              width="100%"
+              sx={{
+                py: 4,
+                px: 2,
+                borderRadius: '12px',
+                backgroundColor: landingPalette.hoverBg,
+                border: `1.5px dashed ${landingPalette.primary}`,
+              }}
             >
-              {formatCountdown(msLeft)}
-            </Typography>
-          </Stack>
+              <CircularProgress size={36} sx={{ color: landingPalette.primary }} />
+              <Typography
+                color={landingPalette.primaryDark}
+                fontWeight={700}
+                fontSize={{ xs: '16px', sm: '18px' }}
+                textAlign="center"
+              >
+                Memuat kuis…
+              </Typography>
+              <Typography
+                color={landingPalette.primaryDark}
+                fontSize={{ xs: '13px', sm: '14px' }}
+                textAlign="center"
+                sx={{ opacity: 0.75 }}
+              >
+                Sedang mengambil data hari ini
+              </Typography>
+            </Stack>
+          ) : (
+            <>
+              {/* Tombol Mulai (dengan status loading di dalam) */}
+              <Button
+                onClick={handleStart}
+                disabled={!canPlay || loading}
+                variant="contained"
+                fullWidth
+                sx={{
+                  py: 1.75,
+                  borderRadius: '10px',
+                  textTransform: 'none',
+                  fontWeight: 700,
+                  fontSize: { xs: '20px', sm: '24px' },
+                  color: landingPalette.primaryContrastText,
+                  backgroundColor: landingPalette.primary,
+                  boxShadow: '0 8px 20px rgba(198, 94, 43, 0.35)',
+                  transition:
+                    'transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease',
+                  '&:hover': {
+                    backgroundColor: landingPalette.primaryDark,
+                    transform: 'translateY(-2px)',
+                    boxShadow: '0 12px 24px rgba(198, 94, 43, 0.4)',
+                  },
+                  '&:active': { transform: 'scale(0.98)' },
+                  '&.Mui-disabled': {
+                    backgroundColor: '#e0cfc7',
+                    color: '#fff',
+                    boxShadow: 'none',
+                  },
+                }}
+              >
+                {loading ? (
+                  <Stack direction="row" alignItems="center" gap={1}>
+                    <CircularProgress size={20} sx={{ color: '#fff' }} />
+                    Memuat…
+                  </Stack>
+                ) : (
+                  'Mulai'
+                )}
+              </Button>
+
+              {/* Info banner (kalau belum bisa main) */}
+              {infoText && (
+                <Stack
+                  alignItems="center"
+                  gap={0.75}
+                  sx={{
+                    width: '100%',
+                    px: 2,
+                    py: 1.5,
+                    borderRadius: '10px',
+                    backgroundColor: '#fff7e6',
+                    border: `1.5px dashed ${landingPalette.primary}`,
+                  }}
+                >
+                  <Stack direction="row" alignItems="center" gap={1}>
+                    <CircularProgress size={16} sx={{ color: landingPalette.primary }} />
+                    <Typography
+                      color={landingPalette.primaryDark}
+                      fontWeight={700}
+                      fontSize={{ xs: '13px', sm: '14px' }}
+                      textAlign="center"
+                    >
+                      {isWindowClosed ? 'Soal sedang dibuat' : 'Belum tersedia'}
+                    </Typography>
+                  </Stack>
+                  <Typography
+                    color={landingPalette.primaryDark}
+                    fontSize={{ xs: '12px', sm: '13px' }}
+                    textAlign="center"
+                    sx={{ opacity: 0.85 }}
+                  >
+                    {infoText}
+                  </Typography>
+                </Stack>
+              )}
+
+              {/* Countdown — hanya tampil kalau quizDate valid */}
+              {quizDate && (
+                <Stack alignItems="center" gap={0.25}>
+                  <Typography
+                    color={landingPalette.primaryDark}
+                    fontSize={{ xs: '14px', sm: '16px' }}
+                    sx={{ opacity: 0.8 }}
+                  >
+                    {countdownLabel}
+                  </Typography>
+                  <Typography
+                    role="timer"
+                    aria-label={`${countdownLabel} ${formatCountdown(remaining)}`}
+                    color={landingPalette.primary}
+                    fontWeight={700}
+                    fontSize={{ xs: '26px', sm: '30px' }}
+                    sx={{ fontVariantNumeric: 'tabular-nums', letterSpacing: '1px' }}
+                  >
+                    {formatCountdown(remaining)}
+                  </Typography>
+                  <Typography
+                    color={landingPalette.primaryDark}
+                    fontSize={{ xs: '11px', sm: '12px' }}
+                    sx={{ opacity: 0.6 }}
+                  >
+                    (kuis tutup: 00.00 - 00.10)
+                  </Typography>
+                </Stack>
+              )}
+            </>
+          )}
         </Stack>
 
         {/* Papan peringkat hari ini */}
         <Stack width="100%" maxWidth="720px" gap={1.5}>
           <Stack gap={0.25}>
-            <Typography color={landingPalette.primaryDark} fontWeight={700} fontSize={{ xs: '20px', sm: '24px' }}>
+            <Typography
+              color={landingPalette.primaryDark}
+              fontWeight={700}
+              fontSize={{ xs: '20px', sm: '24px' }}
+            >
               Papan Peringkat Hari Ini
             </Typography>
-            <Typography color={landingPalette.primaryDark} fontSize={{ xs: '14px', sm: '16px' }} sx={{ opacity: 0.8 }}>
+            <Typography
+              color={landingPalette.primaryDark}
+              fontSize={{ xs: '14px', sm: '16px' }}
+              sx={{ opacity: 0.8 }}
+            >
               Skor pemain yang sudah menyelesaikan kuis
             </Typography>
           </Stack>
 
-          {loading ? (
+          {!initialized || loading ? (
             <Stack alignItems="center" justifyContent="center" gap={2} py={5}>
               <CircularProgress sx={{ color: landingPalette.primary }} />
               <Typography color={landingPalette.primaryDark} fontSize={16}>
@@ -355,7 +536,11 @@ export default function HomePage() {
                 backgroundColor: '#ffebee',
               }}
             >
-              <Typography textAlign="center" color={landingPalette.wrong} fontSize={{ xs: '15px', sm: '18px' }}>
+              <Typography
+                textAlign="center"
+                color={landingPalette.wrong}
+                fontSize={{ xs: '15px', sm: '18px' }}
+              >
                 {error}
               </Typography>
             </Stack>
@@ -392,13 +577,16 @@ export default function HomePage() {
               >
                 Belum ada yang menyelesaikan kuis hari ini
               </Typography>
-              <Typography textAlign="center" color={landingPalette.primaryDark} fontSize={{ xs: '15px', sm: '18px' }}>
+              <Typography
+                textAlign="center"
+                color={landingPalette.primaryDark}
+                fontSize={{ xs: '15px', sm: '18px' }}
+              >
                 Jadilah yang pertama! Raih peringkat 1 dan pimpin papan peringkat hari ini.
               </Typography>
             </Stack>
           ) : (
             <>
-              {/* Judul kolom */}
               <Stack
                 direction="row"
                 gap={{ xs: 1, sm: 2 }}
@@ -409,10 +597,16 @@ export default function HomePage() {
                   fontSize: { xs: '12px', sm: '14px' },
                 }}
               >
-                <Box sx={{ width: { xs: 32, sm: 40 }, flexShrink: 0, textAlign: 'center' }}>#</Box>
+                <Box sx={{ width: { xs: 32, sm: 40 }, flexShrink: 0, textAlign: 'center' }}>
+                  #
+                </Box>
                 <Box sx={{ flex: 1 }}>Nama</Box>
-                <Box sx={{ width: { xs: 56, sm: 80 }, flexShrink: 0, textAlign: 'right' }}>Streak</Box>
-                <Box sx={{ width: { xs: 48, sm: 72 }, flexShrink: 0, textAlign: 'right' }}>Skor</Box>
+                <Box sx={{ width: { xs: 56, sm: 80 }, flexShrink: 0, textAlign: 'right' }}>
+                  Streak
+                </Box>
+                <Box sx={{ width: { xs: 48, sm: 72 }, flexShrink: 0, textAlign: 'right' }}>
+                  Skor
+                </Box>
               </Stack>
 
               {top.map((entry) => (
