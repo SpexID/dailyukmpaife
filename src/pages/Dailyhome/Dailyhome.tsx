@@ -267,7 +267,7 @@ export default function HomePage() {
     infoText = 'Quiz belum tersedia. Coba lagi beberapa saat lagi.';
   } else if (isWindowClosed) {
     infoText =
-      'Soal hari ini sedang dibuat oleh AI. Mohon tunggu, kuis akan otomatis terbuka sebentar lagi.';
+      'Soal hari ini sedang dibuat. Mohon tunggu sebentar lagi.';
   } else if (windowOpen && !quizAvailable && !loading) {
     infoText = 'Soal hari ini belum tersedia. Coba refresh sebentar lagi.';
   }
